@@ -1,10 +1,6 @@
 .venv
-structure.txt
 
 data
 *__pycache__
 
-weights
-
-GEMINI.md
-resources
+backtest_performance_comparison.png

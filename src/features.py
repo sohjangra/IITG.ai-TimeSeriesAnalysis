@@ -94,6 +94,21 @@ class FeatureEngineer:
         """
         df = df.copy()
         
+        # Ensure index is DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+            
+        # Ensure all volume representations exist to prevent KeyErrors across training, execution, and backtesting
+        if 'volume_asset' not in df.columns and 'volume' in df.columns:
+            df['volume_asset'] = df['volume']
+        if 'volume' not in df.columns and 'volume_asset' in df.columns:
+            df['volume'] = df['volume_asset']
+        if 'volume_usdt' not in df.columns:
+            if 'volume_asset' in df.columns:
+                df['volume_usdt'] = df['volume_asset'] * df['close']
+            else:
+                df['volume_usdt'] = 0.0
+        
         # Calculate base features
         df = self.add_time_encoding(df)
         df = self.calculate_variance_ratio(df)

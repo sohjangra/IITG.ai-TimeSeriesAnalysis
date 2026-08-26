@@ -8,12 +8,32 @@ import matplotlib.pyplot as plt
 # Import your custom architecture
 from src.architecture import DualBranchVolatilityNet
 
-def load_test_data(filepath):
-    print(f"Loading test data from {filepath}...")
-    df = pd.read_csv(filepath)
-    df['open_time'] = pd.to_datetime(df['open_time'])
-    df.set_index('open_time', inplace=True)
-    return df
+def load_test_data(raw_filepath, processed_filepath):
+    """
+    Loads raw test data, runs FeatureEngineer to generate VWAP and other features,
+    saves the processed dataset, and returns it.
+    """
+    from src.features import FeatureEngineer
+    print(f"Loading raw test data from {raw_filepath}...")
+    df = pd.read_csv(raw_filepath)
+    
+    # Standardize index Column
+    if 'open_time' in df.columns:
+        df['open_time'] = pd.to_datetime(df['open_time'])
+        df.set_index('open_time', inplace=True)
+    elif 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df.set_index('timestamp', inplace=True)
+        
+    print("Engineering features on test dataset...")
+    engineer = FeatureEngineer(vr_q=5, rolling_window=78)
+    df_processed = engineer.build_feature_set(df)
+    
+    # Save the processed test data
+    os.makedirs(os.path.dirname(processed_filepath), exist_ok=True)
+    df_processed.to_csv(processed_filepath)
+    print(f"Saved processed test data to {processed_filepath}.")
+    return df_processed
 
 def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_period=20, benchmark_mode=None):
     """
@@ -35,7 +55,7 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
     fee_rate = 0.001 # Binance Spot 0.1%
     
     feature_cols = [
-        'open', 'high', 'low', 'close', 'volume_asset', 
+        'open', 'high', 'low', 'close', 'volume', 
         'sin_time', 'cos_time', 'variance_ratio', 
         'mfi', 'vol_acceleration'
     ]
@@ -48,6 +68,25 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
     if benchmark_mode == 'constant_vol':
         pct_returns = pd.Series(close_prices).pct_change()
         rolling_std_pct = pct_returns.rolling(window=sma_period).std().values
+    else:
+        # Pre-compute PyTorch batch predictions for DL strategy
+        print("Pre-computing batch model predictions for efficiency...")
+        sequences = []
+        for i in range(seq_len, len(df)):
+            seq = features_array[i - seq_len : i]
+            sequences.append(seq)
+            
+        sequences_tensor = torch.tensor(np.array(sequences), dtype=torch.float32)
+        batch_size = 512
+        predicted_rvs_list = []
+        model.eval()
+        with torch.no_grad():
+            for b in range(0, len(sequences_tensor), batch_size):
+                batch_seqs = sequences_tensor[b : b + batch_size].to(device)
+                pred_rv, _ = model(batch_seqs)
+                predicted_rvs_list.append(pred_rv.cpu().numpy())
+                
+        predicted_rvs_array = np.concatenate(predicted_rvs_list, axis=0).flatten()
     
     for i in range(seq_len, len(df)):
         current_price = close_prices[i]
@@ -55,15 +94,10 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
         
         # 1. Volatility Prediction / Estimation
         if benchmark_mode == 'constant_vol':
-            # Classic statistical approach: current standard deviation of past returns
             predicted_vol = rolling_std_pct[i] if not np.isnan(rolling_std_pct[i]) else 0.01
         else:
-            # Deep Learning approach: Inference pass through Dual-Branch model
-            seq = features_array[i - seq_len : i]
-            x_tensor = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
-            with torch.no_grad():
-                predicted_rv, _ = model(x_tensor)
-            predicted_vol = torch.sqrt(predicted_rv).item()
+            predicted_rv_val = predicted_rvs_array[i - seq_len]
+            predicted_vol = np.sqrt(predicted_rv_val)
         
         # 2. Dynamic Bands Calculation
         sma_20 = np.mean(close_prices[i - sma_period : i])
@@ -168,10 +202,11 @@ if __name__ == "__main__":
     initial_cap = 100000.0
     
     # 1. Setup Data Environment
-    if not os.path.exists(test_data_path):
-        print(f"Error: Test data not found at {test_data_path}.")
+    raw_data_path = "data/raw/ETHUSDT_5m_2026-01-01_to_2026-07-01.csv"
+    if not os.path.exists(raw_data_path):
+        print(f"Error: Raw test data not found at {raw_data_path}.")
         sys.exit(1)
-    df_test = load_test_data(test_data_path)
+    df_test = load_test_data(raw_data_path, test_data_path)
     
     # 2. Setup Deep Learning Engine
     print("Loading Dual-Branch Volatility Network...")
