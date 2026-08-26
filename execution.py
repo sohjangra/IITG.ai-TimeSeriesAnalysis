@@ -55,34 +55,36 @@ class ExecutionEnvironment:
 
     def update_buffer(self, current_price):
         """
-        Since the C++ queue only sends current_price, we must construct a 
-        synthetic OHLCV row to keep the 1D-CNN and MFI features fed.
+        Accumulates ticks into the current 5-minute bar, and appends a new bar
+        only when a 5-minute boundary is crossed. This maintains the 5-minute time scale.
         """
-        last_close = self.buffer_df['close'].iloc[-1]
+        now = pd.Timestamp.now(tz='UTC').tz_localize(None)  # Timezone-naive UTC timestamp
+        current_bar_time = now.floor('5min')
         
-        # Synthesize missing tick data
-        new_row = {
-            'open': last_close,
-            'high': max(last_close, current_price),
-            'low': min(last_close, current_price),
-            'close': current_price,
-            # Use rolling average volume as a synthetic proxy to prevent MFI collapse
-            'volume': self.buffer_df['volume'].rolling(10).mean().iloc[-1] 
-        }
+        last_timestamp = self.buffer_df.index[-1]
         
-        # Append and maintain buffer size to prevent memory leaks
-        new_timestamp = pd.Timestamp(datetime.now(timezone.utc))
-        new_df = pd.DataFrame([new_row], index=[new_timestamp])
-        self.buffer_df = pd.concat([self.buffer_df, new_df])
-        self.buffer_df = self.buffer_df.iloc[-100:] # Keep last 100 rows
-
-    def calculate_position_size(self, current_price, money_remaining, risk_fraction):
-        """
-        Calculates whole-number trade sizing based on available capital.
-        """
-        capital_to_risk = money_remaining * risk_fraction
-        qty = int(capital_to_risk // current_price)
-        return qty
+        if current_bar_time == last_timestamp:
+            # Update the current 5-minute bar in place
+            self.buffer_df.loc[last_timestamp, 'close'] = current_price
+            self.buffer_df.loc[last_timestamp, 'high'] = max(self.buffer_df.loc[last_timestamp, 'high'], current_price)
+            self.buffer_df.loc[last_timestamp, 'low'] = min(self.buffer_df.loc[last_timestamp, 'low'], current_price)
+            # Volume is kept at its initialized proxy value to avoid accumulation overflow
+        else:
+            # Boundary crossed, finalize previous bar and create new bar
+            last_close = self.buffer_df['close'].iloc[-1]
+            
+            new_row = {
+                'open': last_close,
+                'high': max(last_close, current_price),
+                'low': min(last_close, current_price),
+                'close': current_price,
+                # Initial volume proxy using the rolling average volume of past bars
+                'volume': self.buffer_df['volume'].rolling(10).mean().iloc[-1]
+            }
+            
+            new_df = pd.DataFrame([new_row], index=[current_bar_time])
+            self.buffer_df = pd.concat([self.buffer_df, new_df])
+            self.buffer_df = self.buffer_df.iloc[-100:] # Keep last 100 rows
 
 # Initialize the global environment
 env = ExecutionEnvironment()
@@ -98,21 +100,21 @@ def execute(current_price: float, money_remaining: float) -> dict:
     """
     global env
     
-    # 1. Default action (Do nothing)
+    # Default action (Do nothing)
     trade_action = {"buy": 0, "sell": 0}
     
     try:
-        # 2. Update state with the new tick
+        # 1. Update state with the new tick
         env.update_buffer(current_price)
         
-        # 3. Engineer features for the current state
+        # 2. Engineer features for the current state
         features_df = env.engineer.build_feature_set(env.buffer_df)
         
         if len(features_df) < env.seq_len:
             # Not enough data for a full forward pass yet
             return trade_action
             
-        # 4. Prepare PyTorch Input (Grab the last 78 bars)
+        # 3. Prepare PyTorch Input (Grab the last 78 bars)
         feature_cols = [
             'open', 'high', 'low', 'close', 'volume', 
             'sin_time', 'cos_time', 'variance_ratio', 
@@ -122,7 +124,7 @@ def execute(current_price: float, money_remaining: float) -> dict:
         seq_array = features_df[feature_cols].iloc[-env.seq_len:].values
         x_tensor = torch.tensor(seq_array, dtype=torch.float32).unsqueeze(0).to(env.device)
         
-        # 5. Model Inference
+        # 4. Model Inference
         with torch.no_grad():
             predicted_rv, gate_weight = env.model(x_tensor)
             
@@ -130,39 +132,37 @@ def execute(current_price: float, money_remaining: float) -> dict:
         predicted_vol = torch.sqrt(predicted_rv).item()
         current_vr = features_df['variance_ratio'].iloc[-1]
         
-        # 6. Trading Strategy Logic (Ernest Chan Sizing)
-        # Calculate moving average baseline
+        # 5. Dynamic Bands Calculation (around SMA-20)
         sma_20 = features_df['close'].iloc[-env.sma_period:].mean()
-        
         upper_band = sma_20 * (1 + (2 * predicted_vol))
         lower_band = sma_20 * (1 - (2 * predicted_vol))
         
-        # === REGIME 1: MEAN-REVERTING (Variance Ratio < 1) ===
-        if current_vr < 1.0:
-            if current_price <= lower_band:
-                # Price overextended downward, expect bounce. Buy with 5% capital.
-                qty = env.calculate_position_size(current_price, money_remaining, risk_fraction=0.05)
+        # 6. Execution Logic (Original Cushioned Flat Strategy)
+        if current_vr < 1.0:  # Mean-Reverting Regime
+            if current_price <= 1.1 * lower_band:
+                # Buy with 5% of remaining capital
+                capital_to_risk = money_remaining * 0.05
+                qty = int(capital_to_risk // current_price)
                 if qty > 0:
                     trade_action["buy"] = qty
                     env.held_inventory += qty
                     
-            elif current_price >= upper_band and env.held_inventory > 0:
-                # Price overextended upward, take profit. 
-                # We limit sell to held_inventory to avoid overwhelming short positions.
+            elif current_price >= 0.9 * upper_band and env.held_inventory > 0:
+                # Sell all inventory
                 trade_action["sell"] = env.held_inventory
                 env.held_inventory = 0
                 
-        # === REGIME 2: BREAKOUT/TRENDING (Variance Ratio > 1) ===
-        else:
-            if current_price >= upper_band:
-                # Volatile upward momentum breakout. Buy heavily (10% capital).
-                qty = env.calculate_position_size(current_price, money_remaining, risk_fraction=0.10)
+        else:  # Breakout / Trending Regime
+            if current_price >= 0.9 * upper_band:
+                # Buy with 10% of remaining capital
+                capital_to_risk = money_remaining * 0.10
+                qty = int(capital_to_risk // current_price)
                 if qty > 0:
                     trade_action["buy"] = qty
                     env.held_inventory += qty
                     
-            elif current_price <= sma_20 and env.held_inventory > 0:
-                # Trend is breaking down, panic sell inventory to protect capital.
+            elif current_price <= 1.1 * sma_20 and env.held_inventory > 0:
+                # Sell all inventory
                 trade_action["sell"] = env.held_inventory
                 env.held_inventory = 0
 

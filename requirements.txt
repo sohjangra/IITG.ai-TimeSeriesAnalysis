@@ -2,3 +2,7 @@ requests
 pandas
 PyWavelets
 scikit-learn
+torch
+ccxt
+numpy
+matplotlib
