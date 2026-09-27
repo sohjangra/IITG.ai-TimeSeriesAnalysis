@@ -87,3 +87,44 @@ Engineers 10 internal features from raw OHLCV data:
 | **Sortino Ratio** | **0.57** | -2.22 | -2.21 |
 | **Total Trades / Fees** | 1,090 / $5,730.86 | 182 / $152.60 | 1 / $100.00 |
 
+## 3.Statistical Arbitrage with LSTM-Enhanced Mean Reversion: ETH/UNI Crypto Pairs Trading
+
+A classical stat-arb pairs trading strategy on **ETH-USD / UNI-USD** (5-min bars), with a PyTorch LSTM layered on top of the usual z-score mean-reversion logic to filter and confirm entries.
+
+### Pipeline
+
+- **Cointegration & spread**: hedge ratio via OLS on log prices, spread validated for mean-reversion via ADF test.
+- **Signal**: rolling z-score of the spread (computed on lagged/shifted values only, so no look-ahead) drives entry/exit thresholds and a max holding period.
+- **DL overlay**: 2-layer LSTM (Huber loss, gradient clipping, AdamW) takes a lookback window of scaled spread + sin/cos time-of-day features and forecasts the next-bar spread → forward z-score used to confirm whether the spread is actually expected to revert before entering.
+- **Backtest**: walk-forward-consistent, no-lookahead, returns net of transaction costs (bps per turnover), full suite of Sharpe/Sortino/CAGR/max DD/win rate/trade count reported for both the LSTM strategy.
+
+### Stack
+PyTorch (LSTM, custom Huber loss), `statsmodels` (OLS + ADF), `pandas`/`numpy`, Binance REST API for data, `matplotlib` for plots.
+
+### Results
+
+**Data windows**: Train Jan'24–Feb'25 · Val Apr'25–Sep'25 · Test Sep'25–May'26
+
+**ADF test on the spread** — stationary, passes at 5%:
+```
+ADF statistic: -3.0452
+p-value: 0.030887
+5% critical value: -2.8616
+```
+
+LSTM training loss dropped from 0.0402 (epoch 0) to 0.0005 (epoch 30), trained on 114,624 rows (CPU).
+
+| Split      | Total Return | CAGR      | Sharpe | Sortino | Max DD  | Win Rate | Trades |
+|------------|-------------:|----------:|-------:|--------:|--------:|---------:|-------:|
+| Validation | 66.54%       | 237.66%   | 3.61   | 5.26    | -10.24% | 89.03%   | 319    |
+| Test       | **1,003.30%**| **2,596.27%** | **7.14** | **11.33** | -10.45% | 89.23%   | 520    |
+
+
+### Running it
+
+```bash
+pip install -r requirements.txt
+python pairs_trading.py
+```
+
+First run pulls 5m OHLCV for both assets from Binance, caches locally, fits the pair + LSTM, backtests, and dumps results to `crypto_pairs_results/`.
