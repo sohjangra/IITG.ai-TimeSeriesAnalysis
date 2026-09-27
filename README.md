@@ -1,7 +1,6 @@
 # IITG.ai-TimeSeriesAnalysis
 This repository contains multiple DL volatility prediction based models we experimented with. All the different approaches as are follows:
 
-```markdown
 ## 1. Jump-BiLSTM Volatility Forecasting and Adaptive Trend Strategy (BTC/USDT)
 
 This approach combines deep-learning volatility forecasting with a volatility-aware trend-following strategy for BTC/USDT.
