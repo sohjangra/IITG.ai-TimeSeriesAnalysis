@@ -128,3 +128,41 @@ python pairs_trading.py
 ```
 
 First run pulls 5m OHLCV for both assets from Binance, caches locally, fits the pair + LSTM, backtests, and dumps results to `crypto_pairs_results/`.
+
+
+##4. Multi-Branch MODWT-CNN-LSTM Volatility Engine and Execution Sandbox
+
+### Project Overview
+An end-to-end quantitative trading and volatility forecasting framework designed for high-frequency cryptocurrency markets (Binance ETH/USDT 10-minute candles). The system combines time-frequency wavelet decomposition, spatial-temporal deep learning, and a fee-aware execution engine to detect ultra-low volatility compression ("squeezes") before explosive directional breakouts occur.
+
+### Technical Architecture
+* Wavelet Signal Filtering: Applies a Maximal Overlap Discrete Wavelet Transform (MODWT) using Daubechies 4 (db4) wavelets to separate macro trends from microstructural noise across six market features (log returns, Garman-Klass volatility, log range, volume change, body gap, and relative close position).
+* Spatial Encoding: Transforms wavelet outputs into Gramian Angular Field (GAF) polar matrices, converting 1D price time series into 2D spatial feature tensors ($32 \times 32 \times 12$).
+* Dual-Branch Fusion Network: Integrates a 2D CNN branch (extracting spatial compression patterns from GAF tensors) with a parallel LSTM branch (processing continuous sequence momentum). Outputs next-bar volatility predictions using an asymmetric QLIKE loss function that heavily penalizes volatility underestimation.
+* Execution Infrastructure: Modular Python architecture featuring vectorized batch inference, paginated data processing via the Binance API, and realistic market friction modeling (0.05% taker / 0.02% maker fees).
+
+### Model Training and Out-of-Sample Performance
+The system was trained on full 2024 to 2025 Binance ETH/USDT data (~105,120 10-minute bars) and evaluated out-of-sample on the first six months of 2026 (25,550 bars).
+
+#### Out-of-Sample Strategy Results (H1 2026)
+
+| Metric | Strategy 1 (Clean Taker) | Strategy 2 (Post-Maker) | Strategy 3 (Anti-Chop) |
+| :--- | :---: | :---: | :---: |
+| Net Return | **+14.06%** | +12.86% | +5.43% |
+| Max Drawdown | -10.00% | -7.94% | **-3.95%** |
+| Sharpe Ratio (Annualized) | 1.55 | **1.76** | 1.04 |
+| Win Rate | 42.4% | 43.2% | 38.6% |
+| Total Trades | 66 | 44 | 44 |
+| Total Fees Paid | 8.22% (0.05% Taker) | 2.23% (0.02% Maker) | 3.85% (0.05% Taker) |
+| Primary Execution | Market Orders | Limit Orders | Dynamic Sizing |
+
+### Key Findings and Operational Takeaways
+
+1. The Ensemble Paradox: Combining the Neural Network with a GARCH(1,1) econometric model achieved the best statistical score (lowest QLIKE loss of 0.6207). However, the standalone Neural Network delivered higher net backtest returns (+14.06%). The GARCH component introduced smoothing lag into rolling percentile rankings, whereas the neural network detected raw, sharp compression points for better entry timing.
+2. Market Taker Superiority: Strategy 1 (Clean Taker) proved to be the most viable production setup. Paying the 0.05% taker fee guaranteed instant entries on fast breakout candles, allowing outsized trend runners to easily absorb transaction fee drag.
+3. Execution Mechanics: Passive limit orders (Strategy 2) suffered from adverse selection in live conditions, missing fast winning breakouts while getting filled on bad setups. Defensive position scaling (Strategy 3) successfully reduced max drawdown to -3.95%, but hurt overall mathematical expectancy by catching major trend runners at half leverage.
+
+### Production Targets
+* Model Gate: Standalone GAF-CNN-LSTM Neural Network
+* Execution Mode: Strategy 1 Market Taker Orders
+* Performance Profile: +14.06% Net Return, 1.55 Sharpe Ratio, -10.00% Max Drawdown
