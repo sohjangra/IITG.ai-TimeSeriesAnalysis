@@ -54,3 +54,36 @@ The strategy operates on six-hour bars and uses EMA-based trend signals. The par
 | Number of trades | 16 | - |
 
 The strategy's bootstrap 95% confidence interval for the Sharpe ratio was `[-1.109, 4.639]`. Since the test period covers only six months and 16 trades, these results should be considered preliminary. A longer walk-forward evaluation across different market conditions would be required for stronger conclusions.
+
+
+
+## 2. Dual-Branch Gated Volatility Network Strategy (ETH-USDT, 5m Candles)
+
+#### 1. Overview & Strategy Logic
+A deep learning trading strategy for ETH-USDT (5-minute OHLCV) that predicts volatility and dynamically switches trading rules using the **Variance Ratio (VR)**:
+* **Dynamic Volatility Bands**: Calculated as $\text{SMA-20} \times (1 \pm 2\hat{\sigma})$, where $\hat{\sigma}$ is forecasted by a PyTorch model.
+* **Range-Bound Regime ($VR < 1.0$)**: Mean-reversion strategy. Buys long when price drops below the lower band and shorts when price exceeds the upper band.
+* **Trending Regime ($VR \ge 1.0$)**: Momentum strategy. Buys long on upside breakouts above upper band and shorts on breakdown below lower band. Liquidates back to cash upon SMA-20 reversion.
+
+#### 2. Model Architecture (`DualBranchVolatilityNet`)
+* **Branch A (Conv1D)**: Extracts spatial price shocks, liquidity gaps, and sharp regime breaks.
+* **Branch B (LSTM)**: 2-layer LSTM modeling temporal memory and historical volatility persistence.
+* **Gated Attention Merger**: Dynamically weights Conv1D shock features vs. LSTM memory based on market state context.
+* **QLIKE Loss Function**: Custom loss function that heavily penalizes volatility under-prediction to protect against liquidation during market crashes.
+
+#### 3. Feature Engineering (78-Bar Lookback ~ 6.5 Hours)
+Engineers 10 internal features from raw OHLCV data:
+* **Regime & Risk**: Variance Ratio (VR), Garman-Klass Volatility, Amihud Illiquidity, Market Fragility Index (MFI).
+* **Volume Dynamics**: Volume Acceleration (z-score), Average Trade Size Proxy.
+* **Time Encoded**: Cyclical Sin/Cos time-of-day features.
+
+#### 4. Performance Matrix (Jan 2026 – May 2026)
+
+| Metric | Dual-Branch DL Strategy | Constant Vol Baseline | Buy & Hold Benchmark |
+| :--- | :---: | :---: | :---: |
+| **Total Return** | **+25.72%** | -47.35% | -47.29% |
+| **Max Drawdown** | **12.64%** | 55.39% | 55.39% |
+| **Sharpe Ratio** | **2.29** | -1.70 | -1.69 |
+| **Sortino Ratio** | **0.57** | -2.22 | -2.21 |
+| **Total Trades / Fees** | 1,090 / $5,730.86 | 182 / $152.60 | 1 / $100.00 |
+
