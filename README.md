@@ -54,8 +54,3 @@ The strategy operates on six-hour bars and uses EMA-based trend signals. The par
 | Number of trades | 16 | - |
 
 The strategy's bootstrap 95% confidence interval for the Sharpe ratio was `[-1.109, 4.639]`. Since the test period covers only six months and 16 trades, these results should be considered preliminary. A longer walk-forward evaluation across different market conditions would be required for stronger conclusions.
-
-### Notebooks
-
-- [`z2-all-models-comparison.ipynb`](notebooks/z2-all-models-comparison.ipynb): Volatility-model training and comparison
-- [`z4-adaptive-trend-btc-vol.ipynb`](notebooks/z4-adaptive-trend-btc-vol.ipynb): AdaptiveTrend strategy backtest
