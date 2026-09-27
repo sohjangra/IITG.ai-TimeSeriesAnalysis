@@ -130,7 +130,7 @@ python pairs_trading.py
 First run pulls 5m OHLCV for both assets from Binance, caches locally, fits the pair + LSTM, backtests, and dumps results to `crypto_pairs_results/`.
 
 
-##4. Multi-Branch MODWT-CNN-LSTM Volatility Engine and Execution Sandbox
+## 4. Multi-Branch MODWT-CNN-LSTM Volatility Engine and Execution Sandbox
 
 ### Project Overview
 An end-to-end quantitative trading and volatility forecasting framework designed for high-frequency cryptocurrency markets (Binance ETH/USDT 10-minute candles). The system combines time-frequency wavelet decomposition, spatial-temporal deep learning, and a fee-aware execution engine to detect ultra-low volatility compression ("squeezes") before explosive directional breakouts occur.
