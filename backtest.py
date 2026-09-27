@@ -5,19 +5,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Import your custom architecture
 from src.architecture import DualBranchVolatilityNet
 
 def load_test_data(raw_filepath, processed_filepath):
-    """
-    Loads raw test data, runs FeatureEngineer to generate VWAP and other features,
-    saves the processed dataset, and returns it.
-    """
     from src.features import FeatureEngineer
-    print(f"Loading raw test data from {raw_filepath}...")
     df = pd.read_csv(raw_filepath)
     
-    # Standardize index Column
     if 'open_time' in df.columns:
         df['open_time'] = pd.to_datetime(df['open_time'])
         df.set_index('open_time', inplace=True)
@@ -25,34 +18,20 @@ def load_test_data(raw_filepath, processed_filepath):
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df.set_index('timestamp', inplace=True)
         
-    print("Engineering features on test dataset...")
     engineer = FeatureEngineer(vr_q=5, rolling_window=78)
     df_processed = engineer.build_feature_set(df)
     
-    # Save the processed test data
     os.makedirs(os.path.dirname(processed_filepath), exist_ok=True)
     df_processed.to_csv(processed_filepath)
-    print(f"Saved processed test data to {processed_filepath}.")
     return df_processed
 
 def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_period=20, benchmark_mode=None):
-    """
-    Simulates the trading strategy.
-    Modes:
-      - None: Uses the Deep Learning Dual-Branch Volatility forecast.
-      - 'constant_vol': Bypasses the DL model and uses standard rolling standard deviation.
-    """
-    mode_desc = "Dual-Branch DL Model" if not benchmark_mode else "Constant Volatility Baseline"
-    print(f"Starting backtest for [{mode_desc}] with ${initial_capital:,.2f} initial capital...")
-    
     cash = initial_capital
     inventory = 0.0  
     equity_curve = []
-    
-    # Tracking metrics
     total_trades = 0
     total_fees_paid = 0.0
-    fee_rate = 0.001 # Binance Spot 0.1%
+    fee_rate = 0.001
     
     feature_cols = [
         'open', 'high', 'low', 'close', 'volume', 
@@ -64,18 +43,11 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
     close_prices = df['close'].values
     vr_values = df['variance_ratio'].values
     
-    # Pre-compute rolling standard deviation percentage for Constant Volatility baseline
     if benchmark_mode == 'constant_vol':
         pct_returns = pd.Series(close_prices).pct_change()
         rolling_std_pct = pct_returns.rolling(window=sma_period).std().values
     else:
-        # Pre-compute PyTorch batch predictions for DL strategy
-        print("Pre-computing batch model predictions for efficiency...")
-        sequences = []
-        for i in range(seq_len, len(df)):
-            seq = features_array[i - seq_len : i]
-            sequences.append(seq)
-            
+        sequences = [features_array[i - seq_len : i] for i in range(seq_len, len(df))]
         sequences_tensor = torch.tensor(np.array(sequences), dtype=torch.float32)
         batch_size = 512
         predicted_rvs_list = []
@@ -92,22 +64,20 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
         current_price = close_prices[i]
         current_vr = vr_values[i]
         
-        # 1. Volatility Prediction / Estimation
         if benchmark_mode == 'constant_vol':
             predicted_vol = rolling_std_pct[i] if not np.isnan(rolling_std_pct[i]) else 0.01
         else:
             predicted_rv_val = predicted_rvs_array[i - seq_len]
             predicted_vol = np.sqrt(predicted_rv_val)
         
-        # 2. Dynamic Bands Calculation
+        # Dynamic volatility bands around SMA-20
         sma_20 = np.mean(close_prices[i - sma_period : i])
         upper_band = sma_20 * (1 + (2 * predicted_vol))
         lower_band = sma_20 * (1 - (2 * predicted_vol))
         
-        # 3. Execution Logic (Dual Long / Short Strategy)
-        if current_vr < 1.0:  # Mean-Reverting Regime
+        # Dual Long / Short regime execution logic
+        if current_vr < 1.0:  # Mean-Reverting
             if current_price <= 1.1 * lower_band:
-                # Cover Short if open
                 if inventory < 0:
                     qty_short = abs(inventory)
                     fee = (qty_short * current_price) * fee_rate
@@ -116,7 +86,6 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_trades += 1
                     inventory = 0.0
 
-                # Open Long (5% capital)
                 capital_to_risk = cash * 0.05
                 qty = round(capital_to_risk / current_price, 4) 
                 fee = (qty * current_price) * fee_rate
@@ -129,7 +98,6 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_trades += 1
                     
             elif current_price >= 0.9 * upper_band:
-                # Sell Long if open
                 if inventory > 0:
                     fee = (inventory * current_price) * fee_rate
                     revenue = (inventory * current_price) - fee
@@ -138,7 +106,6 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_trades += 1
                     inventory = 0.0
 
-                # Open Short (5% capital)
                 capital_to_risk = cash * 0.05
                 qty = round(capital_to_risk / current_price, 4)
                 fee = (qty * current_price) * fee_rate
@@ -150,9 +117,8 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_fees_paid += fee
                     total_trades += 1
                 
-        else:  # Breakout / Trending Regime
+        else:  # Trending
             if current_price >= 0.9 * upper_band:
-                # Cover Short if open
                 if inventory < 0:
                     qty_short = abs(inventory)
                     fee = (qty_short * current_price) * fee_rate
@@ -161,7 +127,6 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_trades += 1
                     inventory = 0.0
 
-                # Open Breakout Long (10% capital)
                 capital_to_risk = cash * 0.10
                 qty = round(capital_to_risk / current_price, 4)
                 fee = (qty * current_price) * fee_rate
@@ -174,7 +139,6 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_trades += 1
                     
             elif current_price <= 1.1 * lower_band:
-                # Sell Long if open
                 if inventory > 0:
                     fee = (inventory * current_price) * fee_rate
                     revenue = (inventory * current_price) - fee
@@ -183,7 +147,6 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_trades += 1
                     inventory = 0.0
 
-                # Open Breakdown Short (10% capital)
                 capital_to_risk = cash * 0.10
                 qty = round(capital_to_risk / current_price, 4)
                 fee = (qty * current_price) * fee_rate
@@ -196,7 +159,6 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_trades += 1
 
             elif current_price <= 1.1 * sma_20 and inventory > 0:
-                # Exit Long
                 fee = (inventory * current_price) * fee_rate
                 revenue = (inventory * current_price) - fee
                 cash += revenue
@@ -205,7 +167,6 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                 inventory = 0.0
 
             elif current_price >= 0.9 * sma_20 and inventory < 0:
-                # Cover Short
                 qty_short = abs(inventory)
                 fee = (qty_short * current_price) * fee_rate
                 cash -= (qty_short * current_price) + fee
@@ -213,18 +174,12 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                 total_trades += 1
                 inventory = 0.0
                 
-        # 4. State Tracking
-        current_equity = cash + (inventory * current_price)
-        equity_curve.append(current_equity)
+        equity_curve.append(cash + (inventory * current_price))
 
-    # Final Liquidation Window
     if inventory != 0:
         final_price = close_prices[-1]
         fee = (abs(inventory) * final_price) * fee_rate
-        if inventory > 0:
-            cash += (inventory * final_price) - fee
-        else:
-            cash -= (abs(inventory) * final_price) + fee
+        cash += (inventory * final_price) - fee if inventory > 0 else -(abs(inventory) * final_price) - fee
         total_fees_paid += fee
         total_trades += 1
         inventory = 0.0
@@ -234,8 +189,7 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
 
 def calculate_metrics(equity_series, initial_cap):
     returns = equity_series.pct_change().dropna()
-    bars_per_year = 365 * 24 * 12 # 5-minute chunks
-    
+    bars_per_year = 365 * 24 * 12
     total_return = ((equity_series.iloc[-1] - initial_cap) / initial_cap) * 100
     
     rolling_max = equity_series.cummax()
@@ -265,48 +219,31 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     test_data_path = "data/processed/test_processed.csv"
     weights_path = "models/dual_branch_weights.pth"
+    raw_data_path = "data/raw/ETHUSDT_5m_2026-01-01_to_2026-07-01.csv"
     
+    if not os.path.exists(raw_data_path):
+        sys.exit(1)
+        
+    df_test = load_test_data(raw_data_path, test_data_path)
     seq_len = 78
     num_features = 10
     initial_cap = 100000.0
     
-    # 1. Setup Data Environment
-    raw_data_path = "data/raw/ETHUSDT_5m_2026-01-01_to_2026-07-01.csv"
-    if not os.path.exists(raw_data_path):
-        print(f"Error: Raw test data not found at {raw_data_path}.")
-        sys.exit(1)
-    df_test = load_test_data(raw_data_path, test_data_path)
-    
-    # 2. Setup Deep Learning Engine
-    print("Loading Dual-Branch Volatility Network...")
     model = DualBranchVolatilityNet(num_features=num_features, seq_len=seq_len)
     if os.path.exists(weights_path):
         model.load_state_dict(torch.load(weights_path, map_location=device))
         model.to(device).eval()
     else:
-        print(f"Error: Weights not found at {weights_path}.")
         sys.exit(1)
         
-    # 3. Process Strategy and Benchmark Variants
-    # Run active model strategy
-    strat_equity, strat_final, strat_trades, strat_fees = run_backtest(
-        df_test, model, device, initial_capital=initial_cap
-    )
-    
-    # Run statistical constant volatility strategy
-    cvol_equity, cvol_final, cvol_trades, cvol_fees = run_backtest(
-        df_test, model, device, initial_capital=initial_cap, benchmark_mode='constant_vol'
-    )
-    
-    # Run baseline Buy & Hold tracker
+    strat_equity, strat_final, strat_trades, strat_fees = run_backtest(df_test, model, device, initial_capital=initial_cap)
+    cvol_equity, cvol_final, cvol_trades, cvol_fees = run_backtest(df_test, model, device, initial_capital=initial_cap, benchmark_mode='constant_vol')
     bh_equity = generate_buy_and_hold_curve(df_test, initial_capital=initial_cap, seq_len=seq_len)
     
-    # 4. Metric Processing Engine
     strat_ret, strat_dd, strat_sharpe, strat_sortino = calculate_metrics(strat_equity, initial_cap)
     cvol_ret, cvol_dd, cvol_sharpe, cvol_sortino = calculate_metrics(cvol_equity, initial_cap)
     bh_ret, bh_dd, bh_sharpe, bh_sortino = calculate_metrics(bh_equity, initial_cap)
     
-    # 5. Output Institutional Performance Ledger
     print("\n" + "="*85)
     print("                COMPLETE SYSTEM EVALUATION MATRIX (Jan 2026 - May 2026)")
     print("="*85)
@@ -322,12 +259,10 @@ if __name__ == "__main__":
     print(f"Total Fees Paid |  ${strat_fees:,.2f}               |  ${cvol_fees:,.2f}                 |  ${(initial_cap * 0.001):,.2f}")
     print("="*85)
     
-    # 6. Comparative Visual Generation
     plt.figure(figsize=(14, 7))
     plt.plot(strat_equity.index, strat_equity.values, label='Dual-Branch DL Strategy', color='blue', linewidth=1.8)
     plt.plot(cvol_equity.index, cvol_equity.values, label='Constant Volatility Baseline', color='purple', linestyle='-.', alpha=0.8)
     plt.plot(bh_equity.index, bh_equity.values, label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.6)
-    
     plt.title("Performance Contrast: Machine Learning Model vs. Comparative Baselines", fontsize=12, fontweight='bold')
     plt.ylabel("Account Balance Value (USD)", fontsize=11)
     plt.xlabel("Historical Date Timeline", fontsize=11)
@@ -335,5 +270,4 @@ if __name__ == "__main__":
     plt.legend(loc='upper left')
     plt.tight_layout()
     plt.savefig("backtest_performance_comparison.png", dpi=300)
-    print("\nSaved high-resolution performance comparison plot to 'backtest_performance_comparison.png'.")
     plt.show()
