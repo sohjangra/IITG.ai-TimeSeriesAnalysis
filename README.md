@@ -1,2 +1,4 @@
 # IITG.ai-TimeSeriesAnalysis
-This repo contains multiple DL volatility prediction based models we experimented with...
+This repository contains multiple DL volatility prediction based models we experimented with. All the different approaches as are follows:
+
+##1.
