@@ -59,6 +59,3 @@ The strategy's bootstrap 95% confidence interval for the Sharpe ratio was `[-1.1
 
 - [`z2-all-models-comparison.ipynb`](notebooks/z2-all-models-comparison.ipynb): Volatility-model training and comparison
 - [`z4-adaptive-trend-btc-vol.ipynb`](notebooks/z4-adaptive-trend-btc-vol.ipynb): AdaptiveTrend strategy backtest
-
-The implementation uses Python, PyTorch, NumPy, Pandas, scikit-learn, CCXT, and Matplotlib.
-```
