@@ -104,9 +104,19 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
         upper_band = sma_20 * (1 + (2 * predicted_vol))
         lower_band = sma_20 * (1 - (2 * predicted_vol))
         
-        # 3. Execution Logic
+        # 3. Execution Logic (Dual Long / Short Strategy)
         if current_vr < 1.0:  # Mean-Reverting Regime
             if current_price <= 1.1 * lower_band:
+                # Cover Short if open
+                if inventory < 0:
+                    qty_short = abs(inventory)
+                    fee = (qty_short * current_price) * fee_rate
+                    cash -= (qty_short * current_price) + fee
+                    total_fees_paid += fee
+                    total_trades += 1
+                    inventory = 0.0
+
+                # Open Long (5% capital)
                 capital_to_risk = cash * 0.05
                 qty = round(capital_to_risk / current_price, 4) 
                 fee = (qty * current_price) * fee_rate
@@ -118,16 +128,40 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_fees_paid += fee
                     total_trades += 1
                     
-            elif current_price >= 0.9 * upper_band and inventory > 0:
-                fee = (inventory * current_price) * fee_rate
-                revenue = (inventory * current_price) - fee
-                cash += revenue
-                total_fees_paid += fee
-                total_trades += 1
-                inventory = 0.0
+            elif current_price >= 0.9 * upper_band:
+                # Sell Long if open
+                if inventory > 0:
+                    fee = (inventory * current_price) * fee_rate
+                    revenue = (inventory * current_price) - fee
+                    cash += revenue
+                    total_fees_paid += fee
+                    total_trades += 1
+                    inventory = 0.0
+
+                # Open Short (5% capital)
+                capital_to_risk = cash * 0.05
+                qty = round(capital_to_risk / current_price, 4)
+                fee = (qty * current_price) * fee_rate
+                revenue = (qty * current_price) - fee
+
+                if qty > 0:
+                    cash += revenue
+                    inventory -= qty
+                    total_fees_paid += fee
+                    total_trades += 1
                 
         else:  # Breakout / Trending Regime
             if current_price >= 0.9 * upper_band:
+                # Cover Short if open
+                if inventory < 0:
+                    qty_short = abs(inventory)
+                    fee = (qty_short * current_price) * fee_rate
+                    cash -= (qty_short * current_price) + fee
+                    total_fees_paid += fee
+                    total_trades += 1
+                    inventory = 0.0
+
+                # Open Breakout Long (10% capital)
                 capital_to_risk = cash * 0.10
                 qty = round(capital_to_risk / current_price, 4)
                 fee = (qty * current_price) * fee_rate
@@ -139,10 +173,42 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
                     total_fees_paid += fee
                     total_trades += 1
                     
+            elif current_price <= 1.1 * lower_band:
+                # Sell Long if open
+                if inventory > 0:
+                    fee = (inventory * current_price) * fee_rate
+                    revenue = (inventory * current_price) - fee
+                    cash += revenue
+                    total_fees_paid += fee
+                    total_trades += 1
+                    inventory = 0.0
+
+                # Open Breakdown Short (10% capital)
+                capital_to_risk = cash * 0.10
+                qty = round(capital_to_risk / current_price, 4)
+                fee = (qty * current_price) * fee_rate
+                revenue = (qty * current_price) - fee
+
+                if qty > 0:
+                    cash += revenue
+                    inventory -= qty
+                    total_fees_paid += fee
+                    total_trades += 1
+
             elif current_price <= 1.1 * sma_20 and inventory > 0:
+                # Exit Long
                 fee = (inventory * current_price) * fee_rate
                 revenue = (inventory * current_price) - fee
                 cash += revenue
+                total_fees_paid += fee
+                total_trades += 1
+                inventory = 0.0
+
+            elif current_price >= 0.9 * sma_20 and inventory < 0:
+                # Cover Short
+                qty_short = abs(inventory)
+                fee = (qty_short * current_price) * fee_rate
+                cash -= (qty_short * current_price) + fee
                 total_fees_paid += fee
                 total_trades += 1
                 inventory = 0.0
@@ -152,10 +218,13 @@ def run_backtest(df, model, device, initial_capital=100000.0, seq_len=78, sma_pe
         equity_curve.append(current_equity)
 
     # Final Liquidation Window
-    if inventory > 0:
+    if inventory != 0:
         final_price = close_prices[-1]
-        fee = (inventory * final_price) * fee_rate
-        cash += (inventory * final_price) - fee
+        fee = (abs(inventory) * final_price) * fee_rate
+        if inventory > 0:
+            cash += (inventory * final_price) - fee
+        else:
+            cash -= (abs(inventory) * final_price) + fee
         total_fees_paid += fee
         total_trades += 1
         inventory = 0.0

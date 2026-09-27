@@ -137,33 +137,69 @@ def execute(current_price: float, money_remaining: float) -> dict:
         upper_band = sma_20 * (1 + (2 * predicted_vol))
         lower_band = sma_20 * (1 - (2 * predicted_vol))
         
-        # 6. Execution Logic (Original Cushioned Flat Strategy)
+        # 6. Execution Logic (Dual Long / Short Strategy)
         if current_vr < 1.0:  # Mean-Reverting Regime
             if current_price <= 1.1 * lower_band:
-                # Buy with 5% of remaining capital
+                # Cover Short if open
+                if env.held_inventory < 0:
+                    trade_action["buy"] += abs(env.held_inventory)
+                    env.held_inventory = 0
+                
+                # Buy Long with 5% of remaining capital
                 capital_to_risk = money_remaining * 0.05
                 qty = int(capital_to_risk // current_price)
                 if qty > 0:
-                    trade_action["buy"] = qty
+                    trade_action["buy"] += qty
                     env.held_inventory += qty
                     
-            elif current_price >= 0.9 * upper_band and env.held_inventory > 0:
-                # Sell all inventory
-                trade_action["sell"] = env.held_inventory
-                env.held_inventory = 0
+            elif current_price >= 0.9 * upper_band:
+                # Sell Long if open
+                if env.held_inventory > 0:
+                    trade_action["sell"] += env.held_inventory
+                    env.held_inventory = 0
+                
+                # Open Short with 5% of remaining capital
+                capital_to_risk = money_remaining * 0.05
+                qty = int(capital_to_risk // current_price)
+                if qty > 0:
+                    trade_action["sell"] += qty
+                    env.held_inventory -= qty  # Negative inventory indicates short position
                 
         else:  # Breakout / Trending Regime
             if current_price >= 0.9 * upper_band:
-                # Buy with 10% of remaining capital
+                # Cover Short if open
+                if env.held_inventory < 0:
+                    trade_action["buy"] += abs(env.held_inventory)
+                    env.held_inventory = 0
+                
+                # Buy Breakout with 10% of remaining capital
                 capital_to_risk = money_remaining * 0.10
                 qty = int(capital_to_risk // current_price)
                 if qty > 0:
-                    trade_action["buy"] = qty
+                    trade_action["buy"] += qty
                     env.held_inventory += qty
                     
+            elif current_price <= 1.1 * lower_band:
+                # Sell Long if open
+                if env.held_inventory > 0:
+                    trade_action["sell"] += env.held_inventory
+                    env.held_inventory = 0
+                
+                # Open Breakdown Short with 10% of remaining capital
+                capital_to_risk = money_remaining * 0.10
+                qty = int(capital_to_risk // current_price)
+                if qty > 0:
+                    trade_action["sell"] += qty
+                    env.held_inventory -= qty
+                    
             elif current_price <= 1.1 * sma_20 and env.held_inventory > 0:
-                # Sell all inventory
-                trade_action["sell"] = env.held_inventory
+                # Exit Long to flat
+                trade_action["sell"] += env.held_inventory
+                env.held_inventory = 0
+                
+            elif current_price >= 0.9 * sma_20 and env.held_inventory < 0:
+                # Cover Short to flat
+                trade_action["buy"] += abs(env.held_inventory)
                 env.held_inventory = 0
 
     except Exception as e:
