@@ -1,89 +1,134 @@
-# IITG.ai-TimeSeriesAnalysis
-This repository contains multiple DL volatility prediction based models we experimented with. All the different approaches as are follows:
+# Statistical Arbitrage with LSTM-Enhanced Mean Reversion: ETH/UNI Crypto Pairs Trading
 
-## 1. Jump-BiLSTM Volatility Forecasting and Adaptive Trend Strategy (BTC/USDT)
+A quantitative research project that builds a classical statistical-arbitrage pairs trading
+strategy on cryptocurrency spot markets using a deep learning forecast of the
+spread's short-term dynamics.
 
-This approach combines deep-learning volatility forecasting with a volatility-aware trend-following strategy for BTC/USDT.
+## Overview
 
-The model uses five-minute market data, jump-related features, cross-asset volatility signals, and a 78-timestep lookback window to forecast realised volatility 30 minutes ahead. The resulting forecast is then used to adjust the trailing-stop distance in the AdaptiveTrend strategy.
+Pairs trading is a market-neutral strategy that exploits the tendency of two economically related
+assets to revert to a stable price relationship. This project implements the full research
+pipeline for such a strategy on **ETH-USD** and **UNI-USD**, sampled at 5-minute resolution:
 
-### Dataset
+1. **Cointegration and spread construction** — estimate a hedge ratio via OLS on log prices and
+   validate mean-reversion behavior with an Augmented Dickey-Fuller test.
+2. **Signal generation** — a rolling z-score of the spread drives a baseline mean-reversion
+   trading rule (entry/exit thresholds, maximum holding period).
+3. **Deep learning overlay** — a PyTorch LSTM is trained to forecast the next-bar spread from a
+   lookback window of scaled spread values and cyclical time-of-day features, producing a
+   forward-looking z-score used to filter and confirm trade entries.
+4. **Backtesting and evaluation** — a walk-forward-consistent, no-lookahead backtest computes
+   returns net of transaction costs, with a full performance suite (Sharpe, Sortino, CAGR, max
+   drawdown, win rate, trade count).
 
-| Split | Period |
-| --- | --- |
-| Training | January 2023 - June 2025 |
-| Validation | July 2025 - December 2025 |
-| Test | January 2026 - June 2026 |
-| Data source | KuCoin via CCXT |
-| Total observations | 368,333 five-minute bars |
 
-The input features include HAR-RV lags, jump decomposition features, ETH volatility, the Deribit DVOL index, intraday seasonality, and FinBERT-based news sentiment.
+## Architecture
 
-### Volatility Model Comparison
-
-| Model | QLIKE | QLIKE Reduction vs. HAR-RV |
-| --- | ---: | ---: |
-| HAR-RV | 0.9900 | Baseline |
-| HAR-LSTM | 0.4689 | 52.6% |
-| DeepVol TCN | 0.4661 | 53.1% |
-| **Jump-BiLSTM with attention** | **0.4319** | **56.7%** |
-
-The Jump-BiLSTM was the best-performing model. It combines bidirectional LSTM layers, attention over the input sequence, and explicit jump-related features.
-
-News sentiment had minimal impact on forecasting performance, changing QLIKE by less than 0.5%. This was likely influenced by the limited news coverage in the dataset.
-
-### AdaptiveTrend Strategy
-
-The predicted volatility is used to scale the strategy's ATR-based trailing stop:
-
-```text
-stop_distance = k * ATR(14) * vol_factor
-vol_factor    = predicted_volatility / median_training_predicted_volatility
+```
+Data Layer        ──  Binance klines API (5m OHLCV), local CSV cache per asset
+Signal Layer       ──  OLS hedge ratio, log-spread, rolling z-score (ADF-validated)
+Forecasting Layer  ──  2-layer LSTM (PyTorch) → next-bar spread forecast → forecast z-score
+Strategy Layer      ──  Threshold-based entry/exit, max holding period, forecast-based filtering
+Backtest Layer      ──  Vectorized position → return mapping with fee-adjusted turnover costs
+Evaluation Layer   ──  Sharpe, Sortino, CAGR, max drawdown, win rate, per-trade P&L
 ```
 
-The strategy operates on six-hour bars and uses EMA-based trend signals. The parameter `k = 4.0` was selected using the validation set and fixed before testing.
+## Tech Stack
 
-### Test-Period Results
-
-| Metric | AdaptiveTrend | Buy and Hold |
-| --- | ---: | ---: |
-| Bar-level Sharpe ratio | **1.838** | -1.935 |
-| Total return | **33.24%** | -35.79% |
-| Maximum drawdown | **-20.68%** | -42.21% |
-| Months outperforming buy and hold | **5 of 6** | - |
-| Number of trades | 16 | - |
-
-The strategy's bootstrap 95% confidence interval for the Sharpe ratio was `[-1.109, 4.639]`. Since the test period covers only six months and 16 trades, these results should be considered preliminary. A longer walk-forward evaluation across different market conditions would be required for stronger conclusions.
+| Category | Tools |
+|---|---|
+| Deep Learning | PyTorch (`nn.LSTM`, custom Huber loss, gradient clipping, AdamW) |
+| Statistics / Econometrics | `statsmodels` (OLS hedge estimation, Augmented Dickey-Fuller test) |
+| Data Handling | `pandas`, `numpy` |
+| Data Source | Binance public REST API (klines endpoint) |
+| Visualization | `matplotlib` |
 
 
+## Methodology
 
-## 2. Dual-Branch Gated Volatility Network Strategy (ETH-USDT, 5m Candles)
+### 1. Pair construction
+The hedge ratio (α, β) is estimated by regressing `log(ETH)` on `log(UNI)` over the training
+window. The resulting spread, `log(ETH) − α − β·log(UNI)`, is tested for stationarity with an
+Augmented Dickey-Fuller test before being used as a trading signal.
 
-#### 1. Overview & Strategy Logic
-A deep learning trading strategy for ETH-USDT (5-minute OHLCV) that predicts volatility and dynamically switches trading rules using the **Variance Ratio (VR)**:
-* **Dynamic Volatility Bands**: Calculated as $\text{SMA-20} \times (1 \pm 2\hat{\sigma})$, where $\hat{\sigma}$ is forecasted by a PyTorch model.
-* **Range-Bound Regime ($VR < 1.0$)**: Mean-reversion strategy. Buys long when price drops below the lower band and shorts when price exceeds the upper band.
-* **Trending Regime ($VR \ge 1.0$)**: Momentum strategy. Buys long on upside breakouts above upper band and shorts on breakdown below lower band. Liquidates back to cash upon SMA-20 reversion.
+### 2. Signal
+A rolling z-score of the spread is computed using **only past values** (`shift(1)` applied before
+the rolling window), which is the standard way to avoid look-ahead bias in a live-tradable rolling
+statistic.
 
-#### 2. Model Architecture (`DualBranchVolatilityNet`)
-* **Branch A (Conv1D)**: Extracts spatial price shocks, liquidity gaps, and sharp regime breaks.
-* **Branch B (LSTM)**: 2-layer LSTM modeling temporal memory and historical volatility persistence.
-* **Gated Attention Merger**: Dynamically weights Conv1D shock features vs. LSTM memory based on market state context.
-* **QLIKE Loss Function**: Custom loss function that heavily penalizes volatility under-prediction to protect against liquidation during market crashes.
+### 3. Forecasting model
+An LSTM (2 layers, configurable hidden size, dropout regularization) consumes a fixed-length
+lookback window of scaled spread values plus sine/cosine-encoded time-of-day features, and
+predicts the next-bar spread. Training uses Huber loss (robust to outlier spread moves) with
+gradient clipping and AdamW.
 
-#### 3. Feature Engineering (78-Bar Lookback ~ 6.5 Hours)
-Engineers 10 internal features from raw OHLCV data:
-* **Regime & Risk**: Variance Ratio (VR), Garman-Klass Volatility, Amihud Illiquidity, Market Fragility Index (MFI).
-* **Volume Dynamics**: Volume Acceleration (z-score), Average Trade Size Proxy.
-* **Time Encoded**: Cyclical Sin/Cos time-of-day features.
+### 4. Trading rule
+A position is opened when the (lagged) z-score crosses an entry threshold **and** the LSTM
+forecast indicates the spread is expected to revert (smaller forecasted deviation than the current
+one). Positions are closed on an exit threshold, mean-reversion confirmation, or a maximum holding
+period, whichever comes first.
 
-#### 4. Performance Matrix (Jan 2026 – May 2026)
+### 5. Backtest
+Returns are computed as the position-weighted, hedge-ratio-adjusted combination of each asset's
+realized return, net of a per-turnover transaction cost (in basis points). All decision variables
+used to size a position at time `t` are constructed from information available strictly before
+`t`, and returns realized at `t` reflect the interval `(t-1, t]`.
 
-| Metric | Dual-Branch DL Strategy | Constant Vol Baseline | Buy & Hold Benchmark |
-| :--- | :---: | :---: | :---: |
-| **Total Return** | **+25.72%** | -47.35% | -47.29% |
-| **Max Drawdown** | **12.64%** | 55.39% | 55.39% |
-| **Sharpe Ratio** | **2.29** | -1.70 | -1.69 |
-| **Sortino Ratio** | **0.57** | -2.22 | -2.21 |
-| **Total Trades / Fees** | 1,090 / $5,730.86 | 182 / $152.60 | 1 / $100.00 |
+### 6. Evaluation
+Performance is reported with annualized Sharpe and Sortino ratios (correctly annualized for
+5-minute bar frequency), CAGR, maximum drawdown, trade-level win rate, and total trade count — for
+both the LSTM-driven strategy and a z-score-only baseline over the same test period, for direct
+comparison.
 
+## Results
+
+- Train Window --> 2024-01-01 to 2025-02-01
+- Validation Window --> 2025-04-01 to 2025-09-01
+- Test Window -->  2025-09-05 to 2026-05-29
+- The spread passed the Augmented Dickey-Fuller stationarity test:
+
+```text
+ADF statistic: -3.0452
+p-value: 0.030887
+5% critical value: -2.8616
+```
+
+The LSTM training loss decreased from `0.0402` at epoch 0 to `0.0005` at epoch 30.
+
+```text
+Device: CPU
+Training rows: 114,624
+Validation rows: 44,065
+Testing rows: 76,609
+Final training loss: 0.0005
+```
+
+| Split      | Total Return | Ending Equity |      CAGR | Sharpe | Sortino | Max Drawdown | Win Rate | Trades |
+| ---------- | -----------: | ------------: | --------: | -----: | ------: | -----------: | -------: | -----: |
+| Validation |       66.54% |        1.6654 |   237.66% | 3.6112 |  5.2616 |      -10.24% |   89.03% |    319 |
+| Test       |    1,003.30% |       11.0330 | 2,596.27% | 7.1425 | 11.3297 |      -10.45% |   89.23% |    520 |
+
+
+
+
+## Getting Started
+
+```bash
+pip install -r requirements.txt
+
+python pairs_trading.py
+```
+
+On first run, the script downloads 5-minute OHLCV data for both assets from Binance, caches it
+locally, fits the pair and the forecasting model, runs the backtest, and writes results to
+`crypto_pairs_results/`.
+
+## Future Work
+
+- Rolling/walk-forward re-estimation of the hedge ratio and z-score parameters.
+- Extension to a multi-pair universe with proper per-pair output isolation.
+- Introduce bid-ask spread and dynamic slippage models.
+
+## License
+
+MIT
